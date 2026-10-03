@@ -1,0 +1,25 @@
+{
+  "name": "voicepeak-production",
+  "version": "0.1.0",
+  "description": "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと静止動画を制作する。",
+  "author": {
+    "name": "rioriost"
+  },
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "VOICEPEAK音声制作",
+    "shortDescription": "原稿とPPTXノートからナレーションを制作",
+    "longDescription": "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと静止動画を制作する。 読み・辞書・聴取結果・再開を管理する。このMacのvp-managerとVOICEPEAKが必要。",
+    "developerName": "rioriost",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "このPPTXのノートから、読みを調整して確認用の音声付き動画を作ってください。",
+      "このテキストの読みを確認し、VOICEPEAKでナレーションを作ってください。"
+    ]
+  }
+}

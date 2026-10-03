@@ -1,0 +1,14 @@
+artifacts/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+.pytest_cache/
+.ruff_cache/
+dist/
+jobs/
+outputs/
+.local/references/
+scripts/probe_voicepeak.py
+scripts/analyze_probe_audio.py
