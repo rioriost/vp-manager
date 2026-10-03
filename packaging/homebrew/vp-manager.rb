@@ -2,11 +2,11 @@
 class VpManager < Formula
   include Language::Python::Virtualenv
 
-  desc "Resumable local VOICEPEAK narration and static slide video production"
+  desc "Resumable VOICEPEAK narration and timed presentation video production"
   homepage "https://github.com/rioriost/vp-manager"
-  url "https://github.com/rioriost/vp-manager/releases/download/v0.1.0/vp_manager-0.1.0-py3-none-any.whl", using: :nounzip
-  version "0.1.0"
-  sha256 "5b5b8f3ba22d3934524e652cb6fd7e2c464a06fa1d0b80c95de39954208e0b51"
+  url "https://github.com/rioriost/vp-manager/releases/download/v0.2.0/vp_manager-0.2.0-py3-none-any.whl", using: :nounzip
+  version "0.2.0"
+  sha256 "1fd23fb81be12de6e2638b2398c07453e808f3fab8439ec02864f683220dfc43"
   license "MIT"
 
   depends_on arch: :arm64

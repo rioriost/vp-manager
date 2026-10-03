@@ -1,19 +1,20 @@
 # vp-manager
 
-テキストやPowerPointのノートから、VOICEPEAKのナレーションと静止スライド動画を作るローカルPythonプログラムです。Skillが読み方を判断し、本体が原稿の保全、辞書の試用と確定保存、音声生成、検査と再開を担当します。
+テキストやPowerPointのノートから、VOICEPEAKのナレーションとプレゼン動画を作るローカルPythonプログラムです。Skillが読み方を判断し、本体が原稿の保全、辞書の試用と確定保存、音声生成、検査と再開を担当します。埋め込み動画には、ノートで指定した時刻に説明を重ねられます。
 
 2026-10-03にVOICEPEAK 1.2.23で検証しました。**確認用WAV・MP4を生成でき、聴取済みの新規語を共通辞書へ保存できます。未知の音声の自然さを無人で合格判定する機能と、アニメーション再現は未実装です。**
 
 - [実装と実機検証の結果](docs/implementation-validation.md)
 - [追加実装とPowerPoint実機検証](docs/continuation-validation.md) / [独立レビュー](docs/continuation-review.md)
 - [聴取済み音声の参照・評価](docs/references.md)
+- [タイミング付き動画の記法](docs/timed-video.md) / [実装レビューと検証](docs/timed-video-review.md)
 - [制作Skill](.agents/skills/voicepeak-production/SKILL.md)
 - [読み・品詞・アクセントの判断JSON](docs/decisions.md)
 - [技術検証](docs/technical-validation.md) / [実装計画](docs/implementation-plan.md)
 
 ## Homebrewでインストール
 
-v0.1.0のHomebrew配布はmacOS 14以降のApple Silicon Macを対象にしています。アクティベーション済みのVOICEPEAKを別途インストールしてください。VOICEPEAK本体、ボイスのライセンス、ASRのモデルは同梱しません。
+Homebrew配布はmacOS 14以降のApple Silicon Macを対象にしています。アクティベーション済みのVOICEPEAKを別途インストールしてください。VOICEPEAK本体、ボイスのライセンス、ASRのモデルは同梱しません。
 
 ```sh
 brew tap rioriost/tap
@@ -97,7 +98,16 @@ vp-manager resume artifacts/job-001
 
 速度は50〜200、ピッチは-300〜300。休止は元の音声へ追加する秒数です。息や子音を削る無音除去は行いません。
 
-## 静止スライド動画
+## 動画出力と解像度
+
+出力は既定で**1080p（1920×1080）**です。`--resolution`で`720p`、`1080p`、`2160p`、または`幅x高さ`を指定します。幅と高さは2〜7680の偶数で指定してください。元のスライドの縦横比を保ち、余った領域を黒で埋めます。
+
+```sh
+vp-manager export-video artifacts/job-001 --pdf /absolute/all-slides.pdf --resolution 1080p --allow-draft
+vp-manager export-video artifacts/job-001 --pdf /absolute/all-slides.pdf --resolution 1280x720 --allow-draft
+```
+
+解像度や`--fps`（既定25）を変更してもTTSの再生成は不要です。完成MP4の実際の幅・高さと映像／音声の時間を検査し、`video/timeline.json`に記録します。
 
 PowerPoint本体の描画を使う場合は、`prepare-slides`で原本を保持した描画用コピーを作ります。コピーだけ非表示スライドを一時表示にし、ノートや見た目は変更しません。
 
@@ -107,7 +117,7 @@ vp-manager prepare-slides artifacts/job-001
 
 返された`render_copy`をPowerPointで開き、PDFへエクスポートします。macOS版でローカル処理にする場合は「印刷に最適」を選び、Microsoftオンラインサービスを使う選択肢を避けます。通常の原本からの書き出しは非表示スライドを除外するため、このコピーを使ってください。PDF書き出し自体はPython内に組み込まず、ホストの画面操作または利用者が担当します。
 
-表示・非表示を含む全スライドを原順序で収めたPDFがあれば、次のように渡せます。音声は非表示スライド分も生成します。動画への収録は表示スライドが既定で、`--include-hidden`で変更します。空ノートは既定で3秒の無音表示です。
+表示・非表示を含む全スライドを原順序で収めたPDFがあれば、次のように渡せます。音声は非表示スライド分も生成します。動画への収録は表示スライドが既定で、`--include-hidden`で変更します。静止スライドの空ノートは既定で3秒の無音表示です。ノートが空の動画スライドは動画全体を再生します。
 
 ```sh
 vp-manager export-video artifacts/job-001 \
@@ -125,7 +135,33 @@ vp-manager export-video artifacts/job-001 \
   --allow-draft
 ```
 
-フォントは変換プロセス内で参照し、コピーやインストールはしません。検証資料ではPowerPoint本体と文字の太さや間隔に差がありました。元の描画を重視する場合はPowerPointのPDFを使います。動画には`visual_review: required`を残し、音声の受入れ済みでも動画全体を自動で`verified`にしません。アニメーション・埋め込み音声や動画は再現せず警告します。
+フォントは変換プロセス内で参照し、コピーやインストールはしません。検証資料ではPowerPoint本体と文字の太さや間隔に差がありました。元の描画を重視する場合はPowerPointのPDFを使います。動画には`visual_review: required`を残し、音声の受入れ済みでも動画全体を自動で`verified`にしません。PowerPointのアニメーション・画面切替・独立した音声オブジェクトは再現しません。
+
+## 埋め込み動画へタイミング付きの説明を重ねる
+
+動画のあるスライドでは、ノートを次のように書きます。指示はそれぞれ独立した行に置きます。
+
+```text
+【再生前】
+これから操作の流れをご覧ください。
+
+【動画を再生】
+
+【0:30付近】
+ここで結果の一覧を確認します。
+
+【1:45付近】
+検証結果を確認し、必要な修正を行います。
+
+【再生後】
+以上が一連の操作です。
+```
+
+再生前の説明を終えてから動画を開始し、時刻の指示は**その動画の先頭からの経過時間**として扱います。「付近」は指定秒で読み始める指定で、自動で場面を探す機能ではありません。再生後の説明では動画の最終フレームを表示します。指示そのものは読み上げず、原本のノートとスライドも変更しません。
+
+同じ`analyze`→読みの判断→`render`→`verify`→`export-video`の流れで、静止スライドと埋め込み動画をまとめたMP4を作ります。TTS中だけ元動画の音量を既定で18 dB下げ、説明が終わると元へ戻します。`--duck-db -24`などで変更できます。
+
+対応するのは1スライドにつき1本の、回転・トリミング・グループ化などのない埋め込み動画です。外部リンク動画や再現できない配置は、理由を示して停止します。説明が次の指定時刻や動画末尾に収まらない場合も、音声を切ったり動画を勝手に遅くしたりせず停止します。[記法・制限と修正方法](docs/timed-video.md)を参照してください。0.1.0で解析済みの動画入りPPTXは、新しいジョブで`analyze`し直してください。
 
 ## 辞書と中断時の回復
 

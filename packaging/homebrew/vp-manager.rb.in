@@ -2,7 +2,7 @@
 class VpManager < Formula
   include Language::Python::Virtualenv
 
-  desc "Resumable local VOICEPEAK narration and static slide video production"
+  desc "Resumable VOICEPEAK narration and timed presentation video production"
   homepage "https://github.com/rioriost/vp-manager"
   url "@@URL@@", using: :nounzip
   version "@@VERSION@@"

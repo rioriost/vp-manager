@@ -46,6 +46,8 @@ def detect_candidates(units: list[dict], dictionary: list[dict]) -> list[dict]:
     registered = {entry["sur"]: entry for entry in dictionary if isinstance(entry.get("sur"), str)}
     result = []
     for unit in units:
+        if unit.get("note_control"):
+            continue
         source = unit["source_text"]
         spans = []
         for pattern, kind in ((_LATIN, "latin"), (_NUM_UNIT, "number_unit"), (_JP_SYMBOL, "symbol")):
@@ -155,6 +157,8 @@ def plan_chunks(units: list[dict], limit: int = 140, protected: list[str] | None
     """Plan synthesis from the reading copy, retaining slide and paragraph identity."""
     chunks = []
     for unit in units:
+        if unit.get("note_control"):
+            continue
         spoken = unit.get("spoken_text", unit["source_text"]).rstrip("\r\n")
         if not spoken.strip():
             continue

@@ -89,6 +89,17 @@ def parser() -> argparse.ArgumentParser:
             )
             p.add_argument("--include-hidden", action="store_true")
             p.add_argument("--fps", type=int, default=25)
+            p.add_argument(
+                "--resolution",
+                default="1080p",
+                help="Output canvas: 720p, 1080p (default), 2160p, or even WIDTHxHEIGHT",
+            )
+            p.add_argument(
+                "--duck-db",
+                type=float,
+                default=-18.0,
+                help="Embedded video audio attenuation during narration, -60 to 0 dB (default: -18)",
+            )
         if name == "accept-review":
             p.add_argument("--chunk", required=True)
             p.add_argument("--reviewer", required=True)
@@ -219,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
                         include_hidden=args.include_hidden,
                         font_dirs=args.font_dir,
                         fps=args.fps,
+                        resolution=args.resolution,
+                        duck_db=args.duck_db,
                     )
             except VPError as exc:
                 if args.command != "status":

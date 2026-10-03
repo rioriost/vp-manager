@@ -11,7 +11,7 @@ After updating the public PyPI `uv.lock` and building the final release wheel:
 
 ```sh
 uv run --script scripts/prepare_homebrew_resources.py \
-  --wheel dist/vp_manager-0.1.0-py3-none-any.whl
+  --wheel dist/vp_manager-0.2.0-py3-none-any.whl
 ```
 
 The generator emits `vp-manager.rb` and `resources-macos-arm64.json`. It rejects

@@ -1,9 +1,9 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "voicepeak-production",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
-  "description": "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと静止動画を制作する。",
+  "description": "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと動画を制作する。",
   "author": {
     "name": "rioriost"
   },
@@ -12,7 +12,7 @@
       "interface": {
         "displayName": "VOICEPEAK音声制作",
         "shortDescription": "原稿とPPTXノートからナレーションを制作",
-        "longDescription": "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと静止動画を制作する。 読み・辞書・聴取結果・再開を管理する。このMacのvp-managerとVOICEPEAKが必要。",
+        "longDescription": "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと動画を制作する。 読み・辞書・聴取結果・再開を管理する。このMacのvp-managerとVOICEPEAKが必要。",
         "developerName": "rioriost",
         "category": "Productivity",
         "capabilities": [

@@ -14,7 +14,7 @@ def build() -> Path:
     skill = plugin / "skills/voicepeak-production"
     references = skill / "references"
     references.mkdir(parents=True, exist_ok=True)
-    description = "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと静止動画を制作する。"
+    description = "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと動画を制作する。"
     interface = {
         "displayName": "VOICEPEAK音声制作",
         "shortDescription": "原稿とPPTXノートからナレーションを制作",
@@ -48,7 +48,7 @@ def build() -> Path:
         json.dumps(compatibility, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     instructions = (project / ".agents/skills/voicepeak-production/SKILL.md").read_text(encoding="utf-8")
-    for name in ("decisions", "references"):
+    for name in ("decisions", "references", "timed-video"):
         instructions = instructions.replace(f"../../../docs/{name}.md", f"references/{name}.md")
         content = (project / f"docs/{name}.md").read_text(encoding="utf-8")
         # Runtime implementation lives in PROJECT_ROOT, outside the plugin cache.

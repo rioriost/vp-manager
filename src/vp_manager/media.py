@@ -1,4 +1,4 @@
-"""Sample-preserving narration assembly and explicitly static slide video export."""
+"""Sample-preserving narration assembly and static/timed presentation video export."""
 
 from __future__ import annotations
 
@@ -242,7 +242,7 @@ def _binary(name: str) -> str:
         f"/opt/homebrew/bin/{name}" if Path(f"/opt/homebrew/bin/{name}").is_file() else None
     )
     if not path:
-        raise VPError(f"{name} is required for static video export", code="environment")
+        raise VPError(f"{name} is required for presentation video export", code="environment")
     return path
 
 
@@ -338,6 +338,39 @@ def _pdf_metadata(path: Path, page: int) -> dict:
     return {"pages": int(count[1]), "encrypted": encrypted[1] != "no", "width": width, "height": height}
 
 
+def parse_resolution(resolution: str = "1080p") -> tuple[int, int]:
+    """Resolve a named or explicit square-pixel output canvas, including portrait."""
+    presets = {"720p": (1280, 720), "1080p": (1920, 1080), "2160p": (3840, 2160)}
+    if isinstance(resolution, str):
+        value = resolution.strip().lower()
+        if value in presets:
+            return presets[value]
+        match = re.fullmatch(r"([0-9]{1,4})x([0-9]{1,4})", value)
+        if match:
+            width, height = map(int, match.groups())
+            if all(2 <= dimension <= 7680 and dimension % 2 == 0 for dimension in (width, height)):
+                return width, height
+    raise VPError(
+        "Resolution must be 720p, 1080p, 2160p, or WIDTHxHEIGHT with even dimensions from 2 to 7680"
+    )
+
+
+def canvas_filter(width: int, height: int) -> str:
+    """Fit an image into a black canvas without cropping, using even pixel sizes.
+
+    Pixel rounding can differ by less than two pixels from the exact aspect
+    ratio. The two-pixel floor also makes extremely narrow canvases encodable.
+    """
+    if type(width) is not int or type(height) is not int:
+        raise VPError("Canvas dimensions must be integers")
+    parse_resolution(f"{width}x{height}")
+    ratio = f"min({width}/(iw*sar),{height}/ih)"
+    return (
+        f"scale=w='max(2,trunc(iw*sar*{ratio}/2)*2)':h='max(2,trunc(ih*{ratio}/2)*2)',"
+        f"setsar=1,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+    )
+
+
 def export_video(
     job_dir: Path,
     job: dict,
@@ -347,13 +380,19 @@ def export_video(
     include_hidden: bool = False,
     fps: int = 25,
     font_dirs: list[Path] | None = None,
+    resolution: str = "1080p",
+    duck_db: float = -18,
 ) -> dict:
-    """Use one static PDF page per inventoried slide; visual review stays explicit."""
+    """Compose PDF slide backgrounds with optional timed local embedded video."""
+    from .embedded_video import render_segment, static_samples, validate_duck_db, validate_inventory
+
+    duck_db = validate_duck_db(duck_db)
     if type(fps) is not int or not 1 <= fps <= 60:
         raise VPError("fps must be an integer between 1 and 60")
+    width, height = parse_resolution(resolution)
     slides = job.get("slides", [])
     if not slides:
-        raise VPError("Static video export requires a PPTX slide inventory")
+        raise VPError("Presentation video export requires a PPTX slide inventory")
     selected = [slide for slide in slides if include_hidden or not slide.get("hidden", False)]
     if not selected:
         raise VPError("No visible slides; explicitly include hidden slides to export this presentation")
@@ -369,13 +408,25 @@ def export_video(
     pdftoppm = _binary("pdftoppm")
     ffmpeg, ffprobe = _binary("ffmpeg"), _binary("ffprobe")
     directory = Path(job_dir).resolve()
-    assembly = assemble(directory, job, allow_draft)
-    by_slide = {slide["slide_id"]: slide for slide in assembly["slides"]}
-    output = _inside(directory, "video/presentation.mp4")
-    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     source = _inside(directory, job["source"]["copy"]) if job.get("source") else None
     if source and (not source.is_file() or sha256(source) != job.get("source_revision")):
         raise VPError("Immutable source changed", code="needs_recovery")
+    if source and source.suffix.lower() == ".pptx":
+        validate_inventory(source, job)
+    elif any(slide.get("videos") or slide.get("timeline") for slide in slides):
+        raise VPError(
+            "Embedded video export requires the immutable PPTX; re-analyze the source", "needs_recovery"
+        )
+    embedded = any(slide.get("videos") for slide in selected)
+    data = {}
+    if embedded:
+        data, (rate, _, _), quality = _load_chunks(directory, job, allow_draft)
+        assembly = {"slides": [], "quality": quality}
+    else:
+        assembly = assemble(directory, job, allow_draft)
+    by_slide = {slide["slide_id"]: slide for slide in assembly["slides"]}
+    output = _inside(directory, "video/presentation.mp4")
+    output.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(prefix=".video-", dir=output.parent) as temp:
         temporary = Path(temp)
         input_pdf = (
@@ -394,23 +445,29 @@ def export_video(
             raise VPError(
                 "PDF must be unencrypted and contain exactly one page per inventoried slide, including hidden slides"
             )
-        width, height = 1280, max(2, round(1280 * metadata["height"] / metadata["width"] / 2) * 2)
-        if height > 7680:
-            raise VPError("PDF aspect ratio exceeds the supported video height")
-        rate = by_slide[selected[0]["id"]]["sample_rate"]
+        if not embedded:
+            rate = by_slide[selected[0]["id"]]["sample_rate"]
         for index, slide in enumerate(selected):
-            audio = by_slide[slide["id"]]
-            samples, _ = sf.read(_inside(directory, audio["path"]), dtype="float64", always_2d=True)
-            frames = math.ceil(len(samples) * fps / rate)
-            # Cumulative rounding keeps boundaries close to their exact frame
-            # timestamps even when samples-per-frame is not an integer.
-            padded_samples = round((total_frames + frames) * rate / fps) - total_samples
-            if padded_samples < len(samples):
-                frames += 1
+            details = None
+            if not slide.get("videos"):
+                if embedded:
+                    samples = static_samples(slide, job, data, rate)
+                else:
+                    audio = by_slide[slide["id"]]
+                    samples, _ = sf.read(_inside(directory, audio["path"]), dtype="float64", always_2d=True)
+                frames = math.ceil(len(samples) * fps / rate)
+                # Cumulative rounding avoids slide-boundary sample drift.
                 padded_samples = round((total_frames + frames) * rate / fps) - total_samples
-            padding = padded_samples - len(samples)
-            audio_pieces.append(np.concatenate([samples, np.zeros((padding, samples.shape[1]))]))
+                if padded_samples < len(samples):
+                    frames += 1
+                    padded_samples = round((total_frames + frames) * rate / fps) - total_samples
+                padding = padded_samples - len(samples)
+                audio_pieces.append(np.concatenate([samples, np.zeros((padding, samples.shape[1]))]))
             page_number = page_by_id[slide["id"]]
+            page_metadata = metadata if index == 0 else _pdf_metadata(input_pdf, page_number)
+            # Bound both raster dimensions while retaining the page aspect ratio.
+            # A portrait page must not create a very tall width-scaled image.
+            fit_by_width = width / page_metadata["width"] <= height / page_metadata["height"]
             image = temporary / f"slide-{index:04d}.png"
             _run(
                 [
@@ -422,9 +479,9 @@ def export_video(
                     "-singlefile",
                     "-cropbox",
                     "-scale-to-x",
-                    str(width),
+                    str(width) if fit_by_width else "-1",
                     "-scale-to-y",
-                    "-1",
+                    "-1" if fit_by_width else str(height),
                     "-png",
                     str(input_pdf),
                     str(image.with_suffix("")),
@@ -432,37 +489,61 @@ def export_video(
                 timeout=120,
             )
             segment = temporary / f"segment-{index:04d}.mp4"
-            scale = f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
-            _run(
-                [
+            if slide.get("videos"):
+                samples, details = render_segment(
+                    source,
+                    slide,
+                    job,
+                    data,
+                    rate,
+                    fps,
+                    image,
+                    page_metadata,
+                    width,
+                    height,
+                    temporary,
+                    segment,
                     ffmpeg,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-nostdin",
-                    "-y",
-                    "-loop",
-                    "1",
-                    "-framerate",
-                    str(fps),
-                    "-i",
-                    str(image),
-                    "-vf",
-                    scale,
-                    "-frames:v",
-                    str(frames),
-                    "-an",
-                    "-c:v",
-                    "libx264",
-                    "-threads",
-                    "1",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-video_track_timescale",
-                    str(fps * 1000),
-                    str(segment),
-                ]
-            )
+                    ffprobe,
+                    duck_db,
+                    frame_offset=total_frames,
+                    sample_offset=total_samples,
+                )
+                frames, padded_samples, padding = details["frames"], len(samples), 0
+                audio_pieces.append(samples)
+            else:
+                _run(
+                    [
+                        ffmpeg,
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-nostdin",
+                        "-y",
+                        "-loop",
+                        "1",
+                        "-framerate",
+                        str(fps),
+                        "-i",
+                        str(image),
+                        "-vf",
+                        canvas_filter(width, height),
+                        "-frames:v",
+                        str(frames),
+                        "-an",
+                        "-c:v",
+                        "libx264",
+                        "-bf",
+                        "0",
+                        "-threads",
+                        "1",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-video_track_timescale",
+                        str(fps * 1000),
+                        str(segment),
+                    ]
+                )
             segment_paths.append(segment.name)
             records.append(
                 {
@@ -481,13 +562,18 @@ def export_video(
                     "duration": frames / fps,
                 }
             )
+            if details is not None:
+                records[-1]["embedded_video"] = details
             total_frames += frames
             total_samples += padded_samples
         concat = temporary / "segments.txt"
         concat.write_text("".join(f"file '{name}'\n" for name in segment_paths), encoding="utf-8")
         joined_audio = temporary / "video-audio.wav"
         sf.write(
-            joined_audio, np.concatenate(audio_pieces), rate, subtype=by_slide[selected[0]["id"]]["subtype"]
+            joined_audio,
+            np.concatenate(audio_pieces),
+            rate,
+            subtype="FLOAT" if embedded else by_slide[selected[0]["id"]]["subtype"],
         )
         candidate = temporary / "presentation.mp4"
         _run(
@@ -545,6 +631,10 @@ def export_video(
             raise VPError(
                 "Exported video streams or frame count do not match the plan", code="needs_recovery"
             )
+        if (int(videos[0].get("width", -1)), int(videos[0].get("height", -1))) != (width, height):
+            raise VPError(
+                "Exported video dimensions do not match the requested canvas", code="needs_recovery"
+            )
         video_duration, audio_duration = float(videos[0]["duration"]), float(audios[0]["duration"])
         if (
             max(abs(video_duration - audio_duration), abs(video_duration - total_frames / fps))
@@ -597,6 +687,8 @@ def export_video(
             "sample_rate": rate,
             "width": width,
             "height": height,
+            "resolution": f"{width}x{height}",
+            "channels": int(audios[0].get("channels", 0)),
         },
         "slides": records,
         "previews": previews,
@@ -606,7 +698,8 @@ def export_video(
         "pdf_sha256": pdf_hash,
         "backend": "provided_pdf" if pdf is not None else "bundled_soffice",
         "font_directories": [str(Path(value).expanduser().resolve()) for value in (font_dirs or [])],
-        "warnings": ["static_slides_only", "visual_fidelity_requires_review"]
+        "warnings": (["embedded_video_composited"] if embedded else ["static_slides_only"])
+        + ["visual_fidelity_requires_review"]
         + sorted({warning for slide in selected for warning in slide.get("warnings", [])}),
     }
     atomic_json(output.parent / "timeline.json", result)

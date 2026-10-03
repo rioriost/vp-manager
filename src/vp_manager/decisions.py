@@ -67,6 +67,8 @@ def apply_decisions(units: list[dict], candidates: list[dict], source_revision: 
         ):
             raise VPError("Invalid override unit or source offsets")
         source = by_unit[unit_id]["source_text"]
+        if by_unit[unit_id].get("note_control"):
+            raise VPError("Timing control markers cannot receive pronunciation overrides")
         if not 0 <= start < end <= len(source) or source[start:end] != override["expected"]:
             raise VPError("Override expected text does not match its exact source span")
         if any(not is_unicode_boundary(source, index) for index in (start, end)):
@@ -76,6 +78,9 @@ def apply_decisions(units: list[dict], candidates: list[dict], source_revision: 
         grouped[unit_id].append(override)
     changed = deepcopy(units)
     for unit in changed:
+        if unit.get("note_control"):
+            unit["spoken_text"] = ""
+            continue
         ordered = sorted(grouped[unit["id"]], key=lambda value: value["start"])
         if any(left["end"] > right["start"] for left, right in pairwise(ordered)):
             raise VPError("Source overrides overlap")
