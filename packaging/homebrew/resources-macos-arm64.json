@@ -6,14 +6,14 @@
     "minimum_macos": "14.0",
     "arch": "arm64"
   },
-  "lock_sha256": "611b1b345a6cec330084ccd7ac6a77509c83002e8e65c17e4d7c8936bd5e2a50",
+  "lock_sha256": "aa7eb2e0b30fb1befa7fb157ca4b0ca5fc8e6cbd644bf51fcaf8990405e8b654",
   "project": {
     "name": "vp-manager",
-    "version": "0.2.0",
-    "filename": "vp_manager-0.2.0-py3-none-any.whl",
-    "url": "https://github.com/rioriost/vp-manager/releases/download/v0.2.0/vp_manager-0.2.0-py3-none-any.whl",
-    "sha256": "1fd23fb81be12de6e2638b2398c07453e808f3fab8439ec02864f683220dfc43",
-    "size": 95999
+    "version": "0.1.1",
+    "filename": "vp_manager-0.1.1-py3-none-any.whl",
+    "url": "https://github.com/rioriost/vp-manager/releases/download/v0.1.1/vp_manager-0.1.1-py3-none-any.whl",
+    "sha256": "0f513ad2313bd9841dee9fb42d5ee4ba932e2bdcf76455ab9f7a2ccd629127d5",
+    "size": 96083
   },
   "resources": [
     {

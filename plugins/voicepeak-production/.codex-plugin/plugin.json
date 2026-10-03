@@ -1,6 +1,6 @@
 {
   "name": "voicepeak-production",
-  "version": "0.2.0",
+  "version": "0.1.1",
   "description": "ローカルVOICEPEAKで原稿やPPTXノートから日本語ナレーションと動画を制作する。",
   "author": {
     "name": "rioriost"

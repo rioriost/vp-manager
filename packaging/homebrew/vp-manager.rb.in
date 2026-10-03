@@ -8,6 +8,7 @@ class VpManager < Formula
   version "@@VERSION@@"
   sha256 "@@SHA256@@"
   license "MIT"
+  version_scheme 1
 
   depends_on arch: :arm64
   depends_on "ffmpeg"

@@ -7,11 +7,15 @@ FFmpeg, Python and libsndfile are Homebrew dependencies. PyMuPDF is excluded.
 Intel macOS and Linux are unsupported by this formula; macOS 14 is the wheel
 compatibility floor, not a claim that every OS release has been tested.
 
+Keep `version_scheme 1` in future formula updates. The project corrected the
+release number from 0.2.0 to 0.1.1; this scheme makes 0.1.1 an upgrade from the
+previously installed scheme-0 release without rewriting published tags.
+
 After updating the public PyPI `uv.lock` and building the final release wheel:
 
 ```sh
 uv run --script scripts/prepare_homebrew_resources.py \
-  --wheel dist/vp_manager-0.2.0-py3-none-any.whl
+  --wheel dist/vp_manager-0.1.1-py3-none-any.whl
 ```
 
 The generator emits `vp-manager.rb` and `resources-macos-arm64.json`. It rejects
