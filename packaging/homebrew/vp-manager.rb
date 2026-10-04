@@ -4,9 +4,9 @@ class VpManager < Formula
 
   desc "Resumable VOICEPEAK narration and timed presentation video production"
   homepage "https://github.com/rioriost/vp-manager"
-  url "https://github.com/rioriost/vp-manager/releases/download/v0.1.1/vp_manager-0.1.1-py3-none-any.whl", using: :nounzip
-  version "0.1.1"
-  sha256 "0f513ad2313bd9841dee9fb42d5ee4ba932e2bdcf76455ab9f7a2ccd629127d5"
+  url "https://github.com/rioriost/vp-manager/releases/download/v0.1.2/vp_manager-0.1.2-py3-none-any.whl", using: :nounzip
+  version "0.1.2"
+  sha256 "556a3c763106a7ad9bd6beb4bb64a3459b2fb47fc641fddf27f01f306f41105c"
   license "MIT"
   version_scheme 1
 

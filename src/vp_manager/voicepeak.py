@@ -81,6 +81,70 @@ def validate_text(text: str) -> None:
         raise VPError("Symbol-bearing terms require an explicit safe reading before synthesis", code="needs_decision")
 
 
+def _group_members(pgid: int) -> list[int]:
+    """Observe only our process group; zombies cannot still write dictionary files."""
+    try:
+        result = subprocess.run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True,
+                                text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise VPError("Unable to check the owned VOICEPEAK process group", "environment") from exc
+    if result.returncode:
+        raise VPError("Owned VOICEPEAK process-group check failed", "environment")
+    members = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if (len(fields) >= 3 and fields[0].isdigit() and fields[1].isdigit()
+                and int(fields[1]) == pgid and not fields[2].startswith("Z")):
+            members.append(int(fields[0]))
+    return members
+
+
+def _finish_process_group(process: subprocess.Popen) -> dict:
+    """Clean up only the session we launched, including after parent exit/crash."""
+    cleanup = {"pgid": process.pid, "term_sent": False, "kill_sent": False, "remaining_pids": []}
+
+    def send(sig, key):
+        try:
+            os.killpg(process.pid, sig)
+            cleanup[key] = True
+        except ProcessLookupError:
+            pass
+
+    # poll() reaps our direct child so it is not mistaken for a live descendant.
+    process.poll()
+    if _group_members(process.pid):
+        send(signal.SIGTERM, "term_sent")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            process.poll()
+            if not _group_members(process.pid):
+                break
+            time.sleep(.05)
+        else:
+            send(signal.SIGKILL, "kill_sent")
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            send(signal.SIGKILL, "kill_sent")
+            process.wait(timeout=5)
+        # A killed grandchild can briefly remain in the process table. Wait for
+        # non-zombie members, not for an unrelated init process to reap zombies.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            cleanup["remaining_pids"] = _group_members(process.pid)
+            if not cleanup["remaining_pids"]:
+                break
+            time.sleep(.05)
+    return cleanup
+
+
+def _stream_diagnostics(stream, limit: int = 4096) -> tuple[str, int]:
+    stream.seek(0, os.SEEK_END)
+    size = stream.tell()
+    stream.seek(max(0, size - limit))
+    return stream.read(limit).decode("utf-8", errors="replace"), size
+
+
 class Voicepeak:
     def __init__(self, executable: Path | None = None, settings: Path | None = None, timeout: float = 60):
         self.executable = Path(executable) if executable else DEFAULT_EXECUTABLE
@@ -94,59 +158,117 @@ class Voicepeak:
         self._emotions: dict[str, list[str]] = {}
         self.last_diagnostics: dict = {}
 
-    def _run(self, args: list[str]) -> str:
-        ensure_no_voicepeak()
-        if not self.executable.is_file() or not os.access(self.executable, os.X_OK):
-            raise VPError(f"VOICEPEAK executable unavailable: {self.executable}", code="environment")
-        engine_before()
+    def _run(self, args: list[str], *, cwd: Path | None = None) -> str:
+        diagnostics = {
+            "exit_code": None, "signal": None, "timed_out": False, "failure_kind": None,
+            "stdout_tail": "", "stderr_tail": "", "stdout_truncated": False, "stderr_truncated": False,
+            "input_transport": "utf8_file" if "--text" in args else "none", "pid": None,
+        }
+        self.last_diagnostics = diagnostics
+        started = time.monotonic()
+        try:
+            ensure_no_voicepeak()
+            if not self.executable.is_file() or not os.access(self.executable, os.X_OK):
+                raise VPError(f"VOICEPEAK executable unavailable: {self.executable}", code="environment")
+            engine_before()
+        except BaseException:
+            diagnostics["failure_kind"] = "preflight"
+            raise
         # Disk-backed diagnostics prevent unbounded PIPE memory on noisy engines.
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+            process = None
+            primary = None
+            cleanup_error = None
+            postflight_error = None
             try:
-                process = subprocess.Popen([str(self.executable), *args], stdin=subprocess.DEVNULL,
-                                           stdout=stdout, stderr=stderr, start_new_session=True)
-            except OSError as exc:
-                engine_after()
-                raise VPError(f"Cannot start VOICEPEAK: {exc}", code="environment") from exc
-            interrupted = None
-            try:
+                # cwd carries arbitrary parent-path characters outside the CLI
+                # parser. Only fixed ASCII input/output basenames enter argv.
+                process = subprocess.Popen([str(self.executable.resolve()), *args], cwd=cwd,
+                                           stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                           start_new_session=True)
+                diagnostics["pid"] = process.pid
                 process.wait(timeout=self.timeout)
-            except BaseException as exc:  # noqa: BLE001 -- always terminate children, then re-raise interruption.
-                interrupted = exc
-                try:
-                    os.killpg(process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
+            except BaseException as exc:  # noqa: BLE001 -- cleanup and evidence also survive interruption.
+                primary = exc
+                diagnostics["timed_out"] = isinstance(exc, subprocess.TimeoutExpired)
+            finally:
+                if process is not None:
                     try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    process.wait(timeout=5)
-                # The parent may terminate before an ignoring child. Kill the
-                # complete group even after wait() reports parent completion.
+                        diagnostics["owned_group_cleanup"] = _finish_process_group(process)
+                        if diagnostics["owned_group_cleanup"]["remaining_pids"]:
+                            cleanup_error = "Owned VOICEPEAK children remain after termination"
+                    except Exception as exc:  # noqa: BLE001 -- retain primary failure even when cleanup fails.
+                        cleanup_error = str(exc)
+                        # Observation failure must not leave our known group
+                        # running. We still fail closed because quiescence was
+                        # not verified; never call engine_after in this case.
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                            diagnostics["cleanup_fallback_kill_sent"] = True
+                        except ProcessLookupError:
+                            pass
+                        except OSError as kill_exc:
+                            diagnostics["cleanup_fallback_error"] = str(kill_exc)
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            pass
+                    diagnostics["exit_code"] = process.poll()
+                    if process.returncode is not None and process.returncode < 0:
+                        try:
+                            diagnostics["signal"] = signal.Signals(-process.returncode).name
+                        except ValueError:
+                            diagnostics["signal"] = f"signal {-process.returncode}"
+                # Capture first: postflight checks must never erase crash evidence.
+                for name, stream in (("stdout", stdout), ("stderr", stderr)):
+                    tail, size = _stream_diagnostics(stream)
+                    diagnostics[f"{name}_tail"] = tail
+                    diagnostics[f"{name}_bytes"] = size
+                    diagnostics[f"{name}_truncated"] = size > 4096
+                diagnostics["elapsed_seconds"] = time.monotonic() - started
+                if diagnostics["timed_out"]:
+                    diagnostics["failure_kind"] = "timeout"
+                elif primary is not None:
+                    diagnostics["failure_kind"] = "launch_error" if process is None else "interrupted"
+                elif diagnostics["exit_code"] != 0:
+                    diagnostics["failure_kind"] = "signal" if diagnostics["signal"] else "nonzero_exit"
+                if cleanup_error:
+                    diagnostics["cleanup_error"] = cleanup_error
+                # A foreign GUI is only observed, never terminated. If either
+                # check fails, leave the dictionary journal inflight/fail closed.
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            ensure_no_voicepeak()
-            engine_after()
-            stderr.seek(0, os.SEEK_END)
-            length = stderr.tell()
-            stderr.seek(max(0, length - 4096))
-            diagnostic = stderr.read(4096).decode("utf-8", errors="replace")
-            self.last_diagnostics = {"exit_code": process.returncode, "stderr_tail": diagnostic,
-                                     "stderr_truncated": length > 4096}
-            if isinstance(interrupted, subprocess.TimeoutExpired):
-                raise VPError("VOICEPEAK timed out; check activation/setup before retrying" + (f": {diagnostic}" if diagnostic else ""), code="environment")
-            if interrupted is not None:
-                raise interrupted
-            if process.returncode != 0:
-                raise VPError(f"VOICEPEAK exited with status {process.returncode}; input was not retried" + (f": {diagnostic}" if diagnostic else ""), code="synthesis")
+                    if cleanup_error:
+                        raise VPError(cleanup_error, "environment")
+                    ensure_no_voicepeak()
+                    engine_after()
+                except Exception as exc:  # noqa: BLE001 -- keep original exit diagnostics alongside the guard.
+                    postflight_error = exc
+                    diagnostics["postflight_error"] = str(exc)
+            suffix = f": {diagnostics['stderr_tail']}" if diagnostics["stderr_tail"] else ""
+            if postflight_error:
+                suffix += f"; postflight safety check: {postflight_error}"
+            if diagnostics["timed_out"]:
+                diagnostics["failure_kind"] = "timeout"
+                raise VPError(f"VOICEPEAK timed out after {self.timeout:g} seconds; input was not retried" + suffix,
+                              code="environment") from primary
+            if primary is not None:
+                diagnostics["failure_kind"] = "launch_error" if process is None else "interrupted"
+                if isinstance(primary, OSError):
+                    raise VPError(f"Cannot start VOICEPEAK: {primary}" + suffix, code="environment") from primary
+                raise primary
+            if diagnostics["exit_code"] != 0:
+                diagnostics["failure_kind"] = "signal" if diagnostics["signal"] else "nonzero_exit"
+                label = f" by {diagnostics['signal']}" if diagnostics["signal"] else ""
+                raise VPError(f"VOICEPEAK exited{label} with status {diagnostics['exit_code']}; input was not retried"
+                              + suffix, code=(getattr(postflight_error, "code", "environment")
+                                             if postflight_error else "synthesis")) from postflight_error
+            if postflight_error is not None:
+                diagnostics["failure_kind"] = "postflight"
+                raise postflight_error
             stdout.seek(0)
             result = stdout.read(1024 * 1024 + 1)
             if len(result) > 1024 * 1024:
+                diagnostics["failure_kind"] = "output_limit"
                 raise VPError("VOICEPEAK diagnostic output exceeded its bound", code="environment")
             return result.decode("utf-8", errors="replace").strip()
 
@@ -205,8 +327,17 @@ class Voicepeak:
             before = dictionary_hash(self.settings)
             with tempfile.TemporaryDirectory(prefix=".vp-render-", dir=output.parent) as temporary:
                 wav = Path(temporary) / "output.wav"
-                self._run(args + ["--say", text, "--out", str(wav)])
+                input_file = Path(temporary) / "input.txt"
+                descriptor = os.open(input_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(text.encode("utf-8"))
+                try:
+                    self._run(args + ["--text", "input.txt", "--out", "output.wav"], cwd=Path(temporary))
+                finally:
+                    self.last_diagnostics.update(input_transport="utf8_file", input_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                                                 input_codepoints=len(text))
                 if dictionary_hash(self.settings) != before:
+                    self.last_diagnostics["failure_kind"] = "dictionary_changed"
                     raise VPError("Dictionary changed during synthesis", code="needs_recovery")
                 try:
                     info = sf.info(wav)
@@ -216,6 +347,7 @@ class Voicepeak:
                     if not np.isfinite(samples).all() or np.max(np.abs(samples)) <= 1e-7:
                         raise ValueError("non-finite or silent audio")
                 except (OSError, RuntimeError, ValueError) as exc:
+                    self.last_diagnostics.update(failure_kind="invalid_output", output_error=str(exc))
                     raise VPError(f"VOICEPEAK did not produce usable WAV audio: {exc}", code="synthesis") from exc
                 peak = float(np.max(np.abs(samples)))
                 metrics = {"sample_rate": sample_rate, "channels": samples.shape[1], "frames": len(samples),

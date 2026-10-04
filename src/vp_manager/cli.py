@@ -267,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
                 "artifacts": job.get("artifacts", {}) if job else {},
                 "issues": [issue(code, str(exc), "error")],
                 "next_action": "Inspect issue before retrying",
+                **({"failed_chunks": job.get("failed_chunks", []),
+                    "render_progress": job.get("render_progress", {})} if job else {}),
             }
         )
         return EXIT_CODES.get(code, 1)

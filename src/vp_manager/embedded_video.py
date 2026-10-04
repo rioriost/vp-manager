@@ -12,6 +12,7 @@ import soundfile as sf
 
 from .common import VPError, fingerprint, sha256
 from .pptx import extract_video, read_pptx
+from .text import actual_spoken_text
 
 _MEDIA_FORMATS = "mov,matroska,webm,avi,asf,mpeg,mpegts,ogg"
 
@@ -154,7 +155,7 @@ def plan_timeline(
             if unit is None or unit.get("note_control") or unit.get("slide_id") != slide["id"]:
                 raise VPError("Invalid narration unit in timed notes", "needs_recovery")
             pieces = groups.get(unit_id, [])
-            if not pieces and unit.get("spoken_text", unit["source_text"]).strip():
+            if not pieces and actual_spoken_text(unit).strip():
                 raise VPError(
                     f"Slide {slide['id']}: missing rendered narration for {unit_id}", "needs_decision"
                 )

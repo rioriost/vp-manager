@@ -7,12 +7,18 @@ import math
 import time
 from pathlib import Path
 
-from . import jobs, lexicon, qa
-from .common import VPError, atomic_json, fingerprint, sha256
+from . import jobs, lexicon, qa, voicepeak
+from .common import VPError, atomic_json, fingerprint, issue, sha256
 from .decisions import apply_decisions
 from .pptx import read_pptx
 from .pronunciation import expected_reading, matched_entries
-from .text import SPLIT_SCHEMA_VERSION, detect_candidates, ingest_text, plan_chunks
+from .text import (
+    SPLIT_SCHEMA_VERSION,
+    detect_candidates,
+    ingest_text,
+    plan_chunks,
+    prepare_synthesis_units,
+)
 from .voicepeak import Voicepeak, engine_session
 
 STATE_DIR = Path.home() / ".local/state/vp-manager/dictionary-transactions"
@@ -42,6 +48,7 @@ def analyze(
         job["units"] = ingest_text(raw)
     if not job["units"] and not job["slides"]:
         raise VPError("Input is empty")
+    job["units"] = prepare_synthesis_units(job["units"])
     dictionary = lexicon.read_dictionary(engine.settings)
     job["candidates"] = detect_candidates(job["units"], dictionary)
     job["unresolved_candidates"] = [c["id"] for c in job["candidates"]]
@@ -59,6 +66,7 @@ def decide(directory: Path, job: dict, payload: dict) -> dict:
     result = apply_decisions(job["units"], job["candidates"], job["source_revision"], payload)
     protected = [o["reading"] for o in payload.get("overrides", [])]
     protected += [e["sur"] for e in result["entries"]]
+    result["units"] = prepare_synthesis_units(result["units"])
     chunks = plan_chunks(result["units"], protected=protected)
     job.update(
         units=result["units"],
@@ -154,6 +162,38 @@ def current_renders(directory: Path, job: dict) -> None:
         raise VPError("Mixed dictionary snapshots cannot be assembled", code="needs_recovery")
 
 
+def _prepare_render_plan(directory: Path, job: dict) -> None:
+    """Upgrade only the engine reading copy; retain source, decisions and attempt history."""
+    original = job["chunks"]
+    if job["history"]:
+        budget = job.setdefault("unit_chunk_budget", {})
+        for chunk in original:
+            budget.setdefault(chunk["unit_id"], sum(c["unit_id"] == chunk["unit_id"] for c in original))
+    job["units"] = prepare_synthesis_units(job["units"])
+    protected = [o["reading"] for o in job.get("decisions", {}).get("overrides", [])]
+    protected += [e["sur"] for e in job["dictionary_entries"]]
+    planned = plan_chunks(job["units"], protected=protected)
+    fields = ("id", "unit_id", "slide_id", "paragraph_index", "text")
+    before = [{k: c[k] for k in fields} for c in original]
+    after = [{k: c[k] for k in fields} for c in planned]
+    if before != after:
+        job.setdefault("plan_updates", []).append({
+            "at": jobs.now(), "reason": "engine_text_preparation",
+            "before": fingerprint(before), "after": fingerprint(after),
+        })
+        job["chunks"] = planned
+        job["renders"], job["qa"], job["artifacts"] = {}, {}, {}
+        job["quality"] = "unreviewed"
+        job.pop("render_plan_key", None)
+    jobs.save(directory, job)
+
+
+def _failed_input(history: list[dict], key: str, synthesis_key: str) -> dict | None:
+    return next((h for h in reversed(history)
+                 if h.get("status") in ("failed", "started")
+                 and (h.get("render_key") == key or h.get("synthesis_key") == synthesis_key)), None)
+
+
 def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
     if job.get("unresolved_candidates"):
         raise VPError("Resolve reading candidates before synthesis", code="needs_decision")
@@ -161,6 +201,7 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
     history = job["history"]
     with engine_session(engine.settings):
         lexicon.assert_clean(engine.settings, STATE_DIR)
+        _prepare_render_plan(directory, job)
         inventory = engine.inventory()
         # Preflight every chunk and voice setting before any synthesis or mutation.
         for chunk in job["chunks"]:
@@ -177,6 +218,32 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                 **options,
             }
             pending = []
+            blocked = []
+            completed = set()
+            failed_now = False
+
+            def progress():
+                job["failed_chunks"] = copy.deepcopy(blocked)
+                job["render_progress"] = {
+                    "total": len(job["chunks"]), "complete": len(completed),
+                    "blocked": len(blocked),
+                    "pending": len(job["chunks"]) - len(completed) - len(blocked),
+                }
+
+            def block(chunk, reason, record):
+                blocked.append({
+                    "chunk_id": chunk["id"], "unit_id": chunk["unit_id"],
+                    "text": chunk["text"], "reason": reason,
+                    "error": record.get("error", "An interrupted synthesis requires investigation"),
+                    "diagnostics": copy.deepcopy(record.get("diagnostics", {})),
+                })
+                progress()
+
+            def synthesis_key(text):
+                # Transport and preparation rule versions are not a license to
+                # retry the same failed utterance. Bind identity to actual input.
+                return fingerprint({k: v for k, v in {**base, "text": text}.items() if k != "split"})
+
             seen_keys = set()
             reserved = {}
             logical_positions = {}
@@ -206,12 +273,12 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                     and sha256(directory / existing["path"]) == existing["sha256"]
                 ):
                     job["renders"][chunk["id"]] = {**existing, "text": chunk["text"]}
+                    completed.add(chunk["id"])
                     continue
-                if any(h.get("render_key") == key and h["status"] in ("failed", "started") for h in history):
-                    raise VPError(
-                        "An unchanged failed or interrupted synthesis must be investigated before retry",
-                        code="needs_decision",
-                    )
+                failed = _failed_input(history, key, synthesis_key(chunk["text"]))
+                if failed:
+                    block(chunk, "unchanged_failure", failed)
+                    continue
                 # Count by stable original paragraph, including obsolete chunk IDs.
                 # Four complete versions of that paragraph are the maximum budget.
                 count = sum(h.get("unit_id") == chunk["unit_id"] for h in history) + reserved.get(
@@ -238,8 +305,9 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                     reserved[chunk["unit_id"]] = reserved.get(chunk["unit_id"], 0) + 1
                     seen_keys.add(key)
                 pending.append((chunk, key))
+            progress()
             if (
-                not pending
+                not pending and not blocked
                 and job.get("render_snapshot") == base
                 and job.get("render_plan_key") == _plan_key(job)
             ):
@@ -282,6 +350,14 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                     and sha256(directory / shared["path"]) == shared["sha256"]
                 ):
                     job["renders"][chunk["id"]] = copy.deepcopy(shared)
+                    completed.add(chunk["id"])
+                    progress()
+                    jobs.save(directory, job)
+                    continue
+                failed = _failed_input(history, key, synthesis_key(chunk["text"]))
+                if failed:
+                    block(chunk, "unchanged_failure", failed)
+                    jobs.save(directory, job)
                     continue
                 spent = sum(
                     h.get("elapsed_seconds", h.get("timeout_seconds", 60) if h["status"] == "started" else 0)
@@ -297,16 +373,22 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                     "logical_id": logical_positions[chunk["id"]],
                     "chunk_id": chunk["id"],
                     "render_key": key,
+                    "synthesis_key": synthesis_key(chunk["text"]),
                     "text": chunk["text"],
                     "path": f"audio/{key}.wav",
                     "status": "started",
                     "started_at": jobs.now(),
                     "dictionary_hash": base["dictionary"],
+                    "render_snapshot": copy.deepcopy(base),
                 }
+                unit = next(u for u in job["units"] if u["id"] == chunk["unit_id"])
+                if "engine_preparation" in unit:
+                    record["engine_preparation"] = copy.deepcopy(unit["engine_preparation"])
                 history.append(record)
                 jobs.save(directory, job)  # A hard kill consumes an attempt too.
                 started = time.monotonic()
                 engine.timeout = call_timeout
+                engine.last_diagnostics = {}
                 try:
                     metrics = engine.render(chunk["text"], directory / record["path"], **options)
                     if metrics["dictionary_hash"] != base["dictionary"]:
@@ -314,15 +396,41 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                             "Dictionary identity changed within render batch", code="needs_recovery"
                         )
                     record.update({k: v for k, v in metrics.items() if k != "path"})
+                    record["diagnostics"] = copy.deepcopy(getattr(engine, "last_diagnostics", {}))
                     record["status"] = "complete"
                     job["renders"][chunk["id"]] = copy.deepcopy(record)
+                    completed.add(chunk["id"])
+                    progress()
                 except BaseException as exc:
-                    record.update(status="failed", error=str(exc), elapsed_seconds=time.monotonic() - started)
+                    record.update(status="failed", error=str(exc), elapsed_seconds=time.monotonic() - started,
+                                  error_code=exc.code if isinstance(exc, VPError) else type(exc).__name__,
+                                  diagnostics=copy.deepcopy(getattr(engine, "last_diagnostics", {})))
+                    block(chunk, "synthesis_failed" if isinstance(exc, VPError) and exc.code == "synthesis"
+                          else "environment_or_interruption", record)
                     jobs.save(directory, job)
-                    raise
+                    if not isinstance(exc, VPError) or exc.code != "synthesis":
+                        raise
+                    # Continue only after the failed invocation has stopped and
+                    # the authoritative dictionary still matches this batch.
+                    voicepeak.ensure_no_voicepeak()
+                    if lexicon.dictionary_hash(engine.settings) != base["dictionary"]:
+                        raise VPError("Dictionary changed after synthesis failure", code="needs_recovery")
+                    failed_now = True
                 finally:
                     engine.timeout = prior_timeout
                 jobs.save(directory, job)
+            progress()
+            if blocked:
+                job["status"] = "failed" if failed_now else "needs_decision"
+                job["issues"].extend(issue("synthesis_blocked", b["error"], "error",
+                                           chunk_id=b["chunk_id"], reason=b["reason"]) for b in blocked)
+                jobs.save(directory, job)
+                ids = ", ".join(b["chunk_id"] for b in blocked)
+                raise VPError(
+                    f"Synthesis incomplete for {ids}; other completed chunks were saved. "
+                    "Revise the affected readings before resume; unchanged failed inputs are not retried",
+                    code="synthesis" if failed_now else "needs_decision",
+                )
             job["render_dictionary_base_hash"] = dictionary_preview["base_dictionary_hash"]
             job["render_dictionary_entries"] = copy.deepcopy(pending_entries)
             job["render_lexicon"] = list(

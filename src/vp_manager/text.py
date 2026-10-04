@@ -1,11 +1,15 @@
 """Lossless source units, conservative reading candidates and synthesis chunks."""
 
+import hashlib
 import re
 import unicodedata
+from copy import deepcopy
 
 from .common import VPError
 
 SPLIT_SCHEMA_VERSION = 1
+ENGINE_PREPARATION_VERSION = 1
+_ENGINE_QUOTE_TRANSLATION = str.maketrans({char: " " for char in "「」『』"})
 _LATIN = re.compile(r"[A-Za-z0-9Ａ-Ｚａ-ｚ０-９]+(?:[._/@:+#%&=\\-][A-Za-z0-9Ａ-Ｚａ-ｚ０-９]+)*[+#%®™]*")
 _NUM_UNIT = re.compile(
     r"[+−-]?[0-9０-９]+(?:[.,．][0-9０-９]+)*(?:\s?(?:GHz|MHz|kHz|Hz|GiB|MiB|KiB|GB|MB|KB|ms|mm|cm|km|kg|mL|ml|mg|秒|分|時間|日|年|月|個|件|枚|文字|倍|度|円|人|回|台|本|％|%|℃|°C|[smgVWA]))?"
@@ -22,6 +26,52 @@ def ingest_text(text: str) -> list[dict]:
         {"id": f"u{i:04d}", "source_text": line, "slide_id": None, "paragraph_index": i}
         for i, line in enumerate(text.splitlines(keepends=True), 1)
     ]
+
+
+def actual_spoken_text(unit: dict) -> str:
+    """Read the prepared synthesis copy; controls never carry narration.
+
+    Call ``prepare_synthesis_units`` before using this selector on source units.
+    A missing engine copy falls back to the unchanged user reading or source.
+    """
+    if unit.get("note_control"):
+        return ""
+    text = unit.get("engine_text", unit.get("spoken_text", unit["source_text"]))
+    if not isinstance(text, str):
+        raise VPError("Synthesis text must be a string")
+    return text
+
+
+def prepare_synthesis_units(units: list[dict]) -> list[dict]:
+    """Replace only Japanese quote delimiters in an audited, separate engine copy.
+
+    The original source and user reading remain byte-for-byte unchanged. Audit
+    offsets are code points in the user reading (or source when no reading was
+    supplied), so they must not be interpreted as original-source decision spans.
+    Recompute from that input every time rather than trusting older engine keys.
+    """
+    prepared = deepcopy(units)
+    for unit in prepared:
+        unit.pop("engine_text", None)
+        unit.pop("engine_preparation", None)
+        if unit.get("note_control"):
+            continue
+        original = actual_spoken_text(unit)
+        replacements = [
+            {"index": index, "source": char, "replacement": " "}
+            for index, char in enumerate(original)
+            if char in "「」『』"
+        ]
+        if replacements:
+            output = original.translate(_ENGINE_QUOTE_TRANSLATION)
+            unit["engine_text"] = output
+            unit["engine_preparation"] = {
+                "schema_version": ENGINE_PREPARATION_VERSION,
+                "replacements": replacements,
+                "input_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+            }
+    return prepared
 
 
 def has_risky_symbols(surface: str) -> bool:
@@ -156,16 +206,20 @@ def split_text(text: str, limit: int = 140, protected: list[str] | None = None) 
 def plan_chunks(units: list[dict], limit: int = 140, protected: list[str] | None = None) -> list[dict]:
     """Plan synthesis from the reading copy, retaining slide and paragraph identity."""
     chunks = []
-    for unit in units:
+    normalized_protected = [
+        word.translate(_ENGINE_QUOTE_TRANSLATION) if isinstance(word, str) else word
+        for word in (protected or [])
+    ]
+    for unit in prepare_synthesis_units(units):
         if unit.get("note_control"):
             continue
-        spoken = unit.get("spoken_text", unit["source_text"]).rstrip("\r\n")
+        spoken = actual_spoken_text(unit).rstrip("\r\n")
         if not spoken.strip():
             continue
         # PPTX soft line breaks become chunk boundaries; tabs become spaces in
         # the synthesis copy only. The exact source/decision copy is retained.
         for line in spoken.splitlines():
-            for part in split_text(line.replace("\t", " "), limit, protected):
+            for part in split_text(line.replace("\t", " "), limit, normalized_protected):
                 if part.strip():
                     chunks.append(
                         {

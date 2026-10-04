@@ -110,7 +110,7 @@ def public(job: dict) -> dict:
         "exported": "Inspect video frames/timing and review unresolved audio quality",
         "verified": "Outputs passed configured checks and recorded listening review",
         "needs_recovery": "recover-dictionary, inspect preserved files before retrying",
-        "failed": "Inspect error; do not repeat unchanged failed synthesis",
+        "failed": "Inspect failed_chunks and diagnostics; revise affected readings, then resume",
     }
     return {
         "schema_version": SCHEMA,
@@ -124,7 +124,8 @@ def public(job: dict) -> dict:
         "quality": job.get("quality", "unreviewed"),
         **{
             key: job[key]
-            for key in ("dictionary_promotion", "reference_export", "reference_matches")
+            for key in ("dictionary_promotion", "reference_export", "reference_matches",
+                        "failed_chunks", "render_progress")
             if key in job
         },
     }
