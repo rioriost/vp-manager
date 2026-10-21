@@ -27,12 +27,12 @@ class FakeEngine:
             "version": "1.2.23",
             "voice_asset_fingerprint": self.assets,
             "dictionary_hash": lexicon.dictionary_hash(self.settings),
-            "narrators": ["Japanese Female 1"],
+            "narrators": ["Japanese Female 1", "Japanese Male 2"],
         }
 
     def validate_input(self, text, **options):
         voicepeak.validate_text(text)
-        if options["narrator"] != "Japanese Female 1":
+        if options["narrator"] not in {"Japanese Female 1", "Japanese Male 2"}:
             raise VPError("Unknown narrator")
 
     def render(self, text, output, **options):
@@ -76,6 +76,61 @@ def start(environment, text):
     directory = root / "job"
     job = pipeline.analyze(directory, engine, text=text)
     return directory, job, engine
+
+
+def test_line_voice_directives_change_each_render_and_qa_provenance(environment):
+    directory, job, engine = start(
+        environment,
+        "【女性1,楽しい10%】同じセリフ。\n"
+        "【男性2,速さ125,ピッチ-20,悲しい30%】同じセリフ。\n"
+        "通常の声。",
+    )
+    assert job["candidates"] == []
+    assert [chunk["text"] for chunk in job["chunks"]] == ["同じセリフ。", "同じセリフ。", "通常の声。"]
+    assert job["chunks"][0]["voice_options"] == {
+        "narrator": "Japanese Female 1", "emotion": {"fun": 10},
+    }
+    pipeline.render(directory, job, engine)
+    assert len(engine.calls) == 3
+    assert engine.calls[0][2] == {
+        "narrator": "Japanese Female 1", "speed": 100, "pitch": 0, "emotion": {"fun": 10},
+    }
+    assert engine.calls[1][2] == {
+        "narrator": "Japanese Male 2", "speed": 125, "pitch": -20, "emotion": {"sad": 30},
+    }
+    assert engine.calls[2][2] == {
+        "narrator": "Japanese Female 1", "speed": 100, "pitch": 0, "emotion": {},
+    }
+    assert job["chunks"][0]["render_key"] != job["chunks"][1]["render_key"]
+    pipeline.current_renders(directory, job)
+    pipeline.verify(directory, job)
+    assert job["qa"]["c0001"]["evidence_key"] != job["qa"]["c0002"]["evidence_key"]
+    pipeline.assemble(directory, job, allow_draft=True)
+    assert (directory / job["artifacts"]["audio"]["path"]).is_file()
+
+
+def test_standalone_voice_directive_applies_only_to_next_utterance(environment):
+    directory, job, engine = start(environment, "【男性2,速さ120】\n最初。\n次。")
+    assert [chunk["text"] for chunk in job["chunks"]] == ["最初。", "次。"]
+    pipeline.render(directory, job, engine)
+    assert [call[2]["narrator"] for call in engine.calls] == ["Japanese Male 2", "Japanese Female 1"]
+    assert [call[2]["speed"] for call in engine.calls] == [120, 100]
+
+
+def test_unknown_directive_and_unavailable_voice_stop_before_synthesis(environment):
+    root, engine = environment
+    with pytest.raises(VPError):
+        pipeline.analyze(root / "invalid", engine, text="【女性1,楽しい110%】本文。")
+    directory, job, engine = start(environment, "【男性1】本文。")
+    with pytest.raises(VPError):
+        pipeline.render(directory, job, engine)
+    assert engine.calls == []
+
+
+def test_child_voice_maps_to_voicepeak_inventory_name():
+    from vp_manager.voice_directives import parse_prefix
+
+    assert parse_prefix("【女の子】こんにちは。") == (5, {"narrator": "Japanese Female Child"})
 
 
 def test_first_batch_reuses_identical_text_without_overwriting_earlier_hash(environment):

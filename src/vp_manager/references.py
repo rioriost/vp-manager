@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .common import VPError, atomic_json, file_lock, fingerprint, sha256
+from .voice_directives import render_snapshot as chunk_snapshot
 
 SCHEMA = 1
 MAX_JSON_BYTES = 2 * 1024 * 1024
@@ -115,7 +116,7 @@ def reference_provenance(job: dict, chunk: dict) -> dict:
         ],
         "target_position": positions[0],
     }
-    provenance = deepcopy(job.get("render_snapshot", {}))
+    provenance = deepcopy(chunk_snapshot(job, chunk))
     provenance["context"] = fingerprint(context)
     from .pronunciation import expected_reading
 
@@ -335,7 +336,8 @@ def export_reference(job_dir: Path, job: dict, destination: Path) -> dict:
     plan = {
         "source": job["source_revision"],
         "chunks": [
-            {key: chunk[key] for key in ("id", "unit_id", "text", "slide_id", "paragraph_index")}
+            {key: chunk[key] for key in ("id", "unit_id", "text", "slide_id", "paragraph_index", "voice_options")
+             if key in chunk}
             for chunk in job.get("chunks", [])
         ],
         "entries": job.get("dictionary_entries", []),
@@ -359,7 +361,7 @@ def export_reference(job_dir: Path, job: dict, destination: Path) -> dict:
         if (
             record.get("status") != "complete"
             or record.get("text") != chunk["text"]
-            or record.get("render_key") != fingerprint({**snapshot, "text": chunk["text"]})
+            or record.get("render_key") != fingerprint({**chunk_snapshot(job, chunk), "text": chunk["text"]})
             or record.get("dictionary_hash") != snapshot.get("dictionary")
         ):
             raise VPError("Stale rendering provenance cannot become a reference", code="needs_recovery")

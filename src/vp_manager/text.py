@@ -6,6 +6,7 @@ import unicodedata
 from copy import deepcopy
 
 from .common import VPError
+from .voice_directives import parse_prefix, source_prefixes
 
 SPLIT_SCHEMA_VERSION = 1
 ENGINE_PREPARATION_VERSION = 1
@@ -62,12 +63,23 @@ def prepare_synthesis_units(units: list[dict]) -> list[dict]:
             for index, char in enumerate(original)
             if char in "「」『』"
         ]
-        if replacements:
-            output = original.translate(_ENGINE_QUOTE_TRANSLATION)
+        output = original.translate(_ENGINE_QUOTE_TRANSLATION)
+        removed = []
+        lines = []
+        offset = 0
+        for line in output.splitlines(keepends=True) or [""]:
+            length, _ = parse_prefix(line)
+            if length:
+                removed.append({"start": offset, "end": offset + length, "source": line[:length]})
+            lines.append(line[length:])
+            offset += len(line)
+        output = "".join(lines)
+        if replacements or removed:
             unit["engine_text"] = output
             unit["engine_preparation"] = {
                 "schema_version": ENGINE_PREPARATION_VERSION,
                 "replacements": replacements,
+                **({"removed_voice_directives": removed} if removed else {}),
                 "input_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
                 "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
             }
@@ -99,6 +111,13 @@ def detect_candidates(units: list[dict], dictionary: list[dict]) -> list[dict]:
         if unit.get("note_control"):
             continue
         source = unit["source_text"]
+        directive_spans = []
+        offset = 0
+        for line in source.splitlines(keepends=True) or [""]:
+            length, _ = parse_prefix(line)
+            if length:
+                directive_spans.append((offset, offset + length))
+            offset += len(line)
         spans = []
         for pattern, kind in ((_LATIN, "latin"), (_NUM_UNIT, "number_unit"), (_JP_SYMBOL, "symbol")):
             spans.extend((m.start(), m.end(), kind) for m in pattern.finditer(source))
@@ -119,6 +138,9 @@ def detect_candidates(units: list[dict], dictionary: list[dict]) -> list[dict]:
             else:
                 merged.append((start, end, kind))
         for start, end, kind in merged:
+            if any(start < boundary_end and end > boundary_start
+                   for boundary_start, boundary_end in directive_spans):
+                continue
             surface = source[start:end]
             if has_risky_symbols(surface):
                 kind = "symbol"
@@ -210,24 +232,40 @@ def plan_chunks(units: list[dict], limit: int = 140, protected: list[str] | None
         word.translate(_ENGINE_QUOTE_TRANSLATION) if isinstance(word, str) else word
         for word in (protected or [])
     ]
+    pending = None
+    previous_slide = None
     for unit in prepare_synthesis_units(units):
+        if unit.get("slide_id") != previous_slide:
+            pending = None
+            previous_slide = unit.get("slide_id")
         if unit.get("note_control"):
+            pending = None
             continue
         spoken = actual_spoken_text(unit).rstrip("\r\n")
-        if not spoken.strip():
-            continue
+        source_lines = unit["source_text"].splitlines()
+        spoken_lines = spoken.splitlines()
+        prefixes = source_prefixes(unit["source_text"])
         # PPTX soft line breaks become chunk boundaries; tabs become spaces in
         # the synthesis copy only. The exact source/decision copy is retained.
-        for line in spoken.splitlines():
+        for index in range(max(len(source_lines), len(spoken_lines))):
+            line = spoken_lines[index] if index < len(spoken_lines) else ""
+            directive = prefixes[index][1] if index < len(source_lines) else None
+            if directive is not None and not line.strip():
+                pending = directive
+                continue
+            options = directive if directive is not None else pending
+            if line.strip():
+                pending = None
             for part in split_text(line.replace("\t", " "), limit, normalized_protected):
                 if part.strip():
-                    chunks.append(
-                        {
+                    chunk = {
                             "id": f"c{len(chunks) + 1:04d}",
                             "unit_id": unit["id"],
                             "slide_id": unit.get("slide_id"),
                             "paragraph_index": unit["paragraph_index"],
                             "text": part,
                         }
-                    )
+                    if options is not None:
+                        chunk["voice_options"] = options
+                    chunks.append(chunk)
     return chunks

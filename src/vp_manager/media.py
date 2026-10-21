@@ -18,6 +18,7 @@ import soundfile as sf
 from .common import VPError, atomic_json, sha256
 from .pronunciation import expected_reading
 from .qa import evidence_key
+from .voice_directives import render_snapshot as chunk_snapshot
 
 BUNDLED_SOFFICE = (
     Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override/soffice"
@@ -84,7 +85,7 @@ def _load_chunks(directory: Path, job: dict, allow_draft: bool) -> tuple[dict, t
         evidence_options = (
             {
                 "content_expected": expected_reading(chunk["text"], job.get("render_lexicon", [])),
-                "provenance": job["render_snapshot"],
+                "provenance": chunk_snapshot(job, chunk),
             }
             if "render_snapshot" in job
             else {}

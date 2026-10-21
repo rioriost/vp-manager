@@ -1,6 +1,7 @@
 import pytest
 
 from vp_manager.common import VPError
+from vp_manager.text import plan_chunks
 from vp_manager.timed_notes import parse_timed_notes
 
 
@@ -57,6 +58,16 @@ def test_plain_notes_do_not_activate_timing_or_change_unit_ids():
 def test_immediate_video_narration_uses_zero_offset():
     parsed = parse_timed_notes(units("【動画を再生】", "冒頭。", "【0:30付近】", "次。"))
     assert [cue["at_seconds"] for cue in parsed["timeline"]["cues"]] == [0, 30]
+
+
+def test_voice_directive_with_timing_cue_is_narration_metadata():
+    parsed = parse_timed_notes(units(
+        "【動画を再生】", "【0:30付近】", "【女性1,楽しい10%】画面です。", "【再生後】", "終わり。",
+    ))
+    chunks = plan_chunks(parsed["units"])
+    assert [chunk["text"] for chunk in chunks] == ["画面です。", "終わり。"]
+    assert chunks[0]["voice_options"] == {"narrator": "Japanese Female 1", "emotion": {"fun": 10}}
+    assert "voice_options" not in chunks[1]
 
 
 @pytest.mark.parametrize(

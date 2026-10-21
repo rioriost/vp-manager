@@ -5,6 +5,7 @@ from itertools import pairwise
 
 from .common import VPError
 from .text import has_risky_symbols, is_unicode_boundary
+from .voice_directives import parse_prefix
 
 
 def _reading_valid(text: str) -> bool:
@@ -71,6 +72,12 @@ def apply_decisions(units: list[dict], candidates: list[dict], source_revision: 
             raise VPError("Timing control markers cannot receive pronunciation overrides")
         if not 0 <= start < end <= len(source) or source[start:end] != override["expected"]:
             raise VPError("Override expected text does not match its exact source span")
+        offset = 0
+        for line in source.splitlines(keepends=True):
+            length, _ = parse_prefix(line)
+            if length and start < offset + length and end > offset:
+                raise VPError("Voice directives cannot receive pronunciation overrides")
+            offset += len(line)
         if any(not is_unicode_boundary(source, index) for index in (start, end)):
             raise VPError("Override splits a Unicode character sequence")
         if not isinstance(override["reading"], str) or not _reading_valid(override["reading"]):

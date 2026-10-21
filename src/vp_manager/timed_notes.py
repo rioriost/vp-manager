@@ -4,6 +4,7 @@ import re
 from copy import deepcopy
 
 from .common import VPError
+from .voice_directives import parse_prefix
 
 _TIME = re.compile(r"【([0-9]{1,6}):([0-5][0-9])付近】")
 _LABELS = {"【再生前】", "【動画を再生】", "【再生後】"}
@@ -78,7 +79,7 @@ def parse_timed_notes(units: list[dict]) -> dict:
                     current_cue = {"at_seconds": seconds, "unit_ids": []}
                     timeline["cues"].append(current_cue)
                 unit["note_phase"] = "control"
-            elif _CONTROL_LIKE.search(label) or (label.startswith("【") and label.endswith("】")):
+            elif (_CONTROL_LIKE.search(label) or (label.startswith("【") and label.endswith("】"))) and not parse_prefix(label)[0]:
                 invalid(f"unknown or malformed control line {label!r}; use a separate marker line")
             elif label:
                 if phase is None:

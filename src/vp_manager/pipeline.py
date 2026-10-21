@@ -19,6 +19,8 @@ from .text import (
     plan_chunks,
     prepare_synthesis_units,
 )
+from .voice_directives import effective_options
+from .voice_directives import render_snapshot as chunk_snapshot
 from .voicepeak import Voicepeak, engine_session
 
 STATE_DIR = Path.home() / ".local/state/vp-manager/dictionary-transactions"
@@ -129,7 +131,8 @@ def _plan_key(job: dict) -> str:
         {
             "source": job["source_revision"],
             "chunks": [
-                {k: c[k] for k in ("id", "unit_id", "text", "slide_id", "paragraph_index")}
+                {k: c[k] for k in ("id", "unit_id", "text", "slide_id", "paragraph_index", "voice_options")
+                 if k in c}
                 for c in job["chunks"]
             ],
             "entries": job["dictionary_entries"],
@@ -148,7 +151,7 @@ def current_renders(directory: Path, job: dict) -> None:
         record = job["renders"].get(chunk["id"])
         if not record or record.get("text") != chunk["text"] or record.get("status") != "complete":
             raise VPError(f"Missing current render: {chunk['id']}", code="needs_decision")
-        expected_key = fingerprint({**job["render_snapshot"], "text": chunk["text"]})
+        expected_key = fingerprint({**chunk_snapshot(job, chunk), "text": chunk["text"]})
         if (
             record.get("render_key") != expected_key
             or record.get("dictionary_hash") != job["render_snapshot"]["dictionary"]
@@ -173,9 +176,9 @@ def _prepare_render_plan(directory: Path, job: dict) -> None:
     protected = [o["reading"] for o in job.get("decisions", {}).get("overrides", [])]
     protected += [e["sur"] for e in job["dictionary_entries"]]
     planned = plan_chunks(job["units"], protected=protected)
-    fields = ("id", "unit_id", "slide_id", "paragraph_index", "text")
-    before = [{k: c[k] for k in fields} for c in original]
-    after = [{k: c[k] for k in fields} for c in planned]
+    fields = ("id", "unit_id", "slide_id", "paragraph_index", "text", "voice_options")
+    before = [{k: c[k] for k in fields if k in c} for c in original]
+    after = [{k: c[k] for k in fields if k in c} for c in planned]
     if before != after:
         job.setdefault("plan_updates", []).append({
             "at": jobs.now(), "reason": "engine_text_preparation",
@@ -205,7 +208,7 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
         inventory = engine.inventory()
         # Preflight every chunk and voice setting before any synthesis or mutation.
         for chunk in job["chunks"]:
-            engine.validate_input(chunk["text"], **options)
+            engine.validate_input(chunk["text"], **effective_options(options, chunk))
         dictionary_preview = lexicon.preview_dictionary(engine.settings, job["dictionary_entries"])
         pending_entries = dictionary_preview["pending_entries"]
         input_dictionary = lexicon.read_dictionary(engine.settings) + pending_entries
@@ -239,10 +242,10 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                 })
                 progress()
 
-            def synthesis_key(text):
+            def synthesis_key(text, snapshot):
                 # Transport and preparation rule versions are not a license to
                 # retry the same failed utterance. Bind identity to actual input.
-                return fingerprint({k: v for k, v in {**base, "text": text}.items() if k != "split"})
+                return fingerprint({k: v for k, v in {**snapshot, "text": text}.items() if k != "split"})
 
             seen_keys = set()
             reserved = {}
@@ -257,7 +260,8 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                     chunk["unit_id"], sum(c["unit_id"] == chunk["unit_id"] for c in job["chunks"])
                 )
             for chunk in job["chunks"]:
-                key = fingerprint({**base, "text": chunk["text"]})
+                snapshot = effective_options(base, chunk)
+                key = fingerprint({**snapshot, "text": chunk["text"]})
                 chunk["render_key"] = key
                 existing = next(
                     (
@@ -275,7 +279,7 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                     job["renders"][chunk["id"]] = {**existing, "text": chunk["text"]}
                     completed.add(chunk["id"])
                     continue
-                failed = _failed_input(history, key, synthesis_key(chunk["text"]))
+                failed = _failed_input(history, key, synthesis_key(chunk["text"], snapshot))
                 if failed:
                     block(chunk, "unchanged_failure", failed)
                     continue
@@ -336,6 +340,7 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
             job["issues"] = copy.deepcopy(job.get("analysis_issues", []))
             jobs.save(directory, job)
             for chunk, key in pending:
+                snapshot = effective_options(base, chunk)
                 shared = next(
                     (
                         h
@@ -354,7 +359,7 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                     progress()
                     jobs.save(directory, job)
                     continue
-                failed = _failed_input(history, key, synthesis_key(chunk["text"]))
+                failed = _failed_input(history, key, synthesis_key(chunk["text"], snapshot))
                 if failed:
                     block(chunk, "unchanged_failure", failed)
                     jobs.save(directory, job)
@@ -373,13 +378,13 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                     "logical_id": logical_positions[chunk["id"]],
                     "chunk_id": chunk["id"],
                     "render_key": key,
-                    "synthesis_key": synthesis_key(chunk["text"]),
+                    "synthesis_key": synthesis_key(chunk["text"], snapshot),
                     "text": chunk["text"],
                     "path": f"audio/{key}.wav",
                     "status": "started",
                     "started_at": jobs.now(),
                     "dictionary_hash": base["dictionary"],
-                    "render_snapshot": copy.deepcopy(base),
+                    "render_snapshot": copy.deepcopy(snapshot),
                 }
                 unit = next(u for u in job["units"] if u["id"] == chunk["unit_id"])
                 if "engine_preparation" in unit:
@@ -390,7 +395,8 @@ def render(directory: Path, job: dict, engine: Voicepeak) -> dict:
                 engine.timeout = call_timeout
                 engine.last_diagnostics = {}
                 try:
-                    metrics = engine.render(chunk["text"], directory / record["path"], **options)
+                    metrics = engine.render(chunk["text"], directory / record["path"],
+                                            **effective_options(options, chunk))
                     if metrics["dictionary_hash"] != base["dictionary"]:
                         raise VPError(
                             "Dictionary identity changed within render batch", code="needs_recovery"
@@ -471,7 +477,7 @@ def verify(directory: Path, job: dict, model: Path | None = None, corpus: Path |
             transcript=transcript,
             acceptance=_review_acceptance(directory, job, chunk),
             content_expected=expected_reading(chunk["text"], job.get("render_lexicon", [])),
-            provenance=job["render_snapshot"],
+            provenance=chunk_snapshot(job, chunk),
         )
         results[chunk["id"]] = result
         issues.extend({**entry, "chunk_id": chunk["id"]} for entry in result["issues"])
@@ -589,7 +595,7 @@ def promote_dictionary(directory: Path, job: dict, engine: Voicepeak) -> dict:
                 chunk["text"],
                 acceptance=acceptance,
                 content_expected=expected_reading(chunk["text"], all_entries),
-                provenance=snapshot,
+                provenance=chunk_snapshot(job, chunk),
             )
             if checked["status"] != "pass" or checked.get("listening") != "accepted":
                 raise VPError(
